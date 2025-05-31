@@ -17,6 +17,216 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 import pytz
 import os
+import tkinter as tk
+from tkinter import ttk, scrolledtext
+from tkinter.messagebox import showinfo
+
+
+class MAIScheduleApp:
+    def __init__(self, root, parser):
+        self.root = root
+        self.parser = parser
+        self.setup_ui()
+
+    def setup_ui(self):
+        self.root.title("Парсер расписания МАИ")
+        self.root.geometry("800x600")
+        self.root.resizable(True, True)
+
+        # Стили
+        style = ttk.Style()
+        style.configure('TFrame', background='#f0f0f0')
+        style.configure('TLabel', background='#f0f0f0', font=('Arial', 10))
+        style.configure('TButton', font=('Arial', 10))
+        style.configure('Header.TLabel', font=('Arial', 12, 'bold'))
+
+        # Главный контейнер
+        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Верхняя панель ввода
+        input_frame = ttk.Frame(main_frame)
+        input_frame.pack(fill=tk.X, pady=5)
+
+        ttk.Label(input_frame, text="Номер группы:").grid(row=0, column=0, padx=5, sticky=tk.W)
+        self.group_entry = ttk.Entry(input_frame, width=20)
+        self.group_entry.grid(row=0, column=1, padx=5)
+        self.group_entry.insert(0, "М8О-104БВ-24")  # Пример по умолчанию
+
+        ttk.Label(input_frame, text="Номер недели:").grid(row=0, column=2, padx=5, sticky=tk.W)
+        self.week_entry = ttk.Entry(input_frame, width=5)
+        self.week_entry.grid(row=0, column=3, padx=5)
+        self.week_entry.insert(0, "1")  # Пример по умолчанию
+
+        fetch_btn = ttk.Button(input_frame, text="Получить расписание", command=self.fetch_schedule)
+        fetch_btn.grid(row=0, column=4, padx=10)
+
+        # Панель информации о группе
+        self.info_frame = ttk.LabelFrame(main_frame, text="Информация о группе", padding=10)
+        self.info_frame.pack(fill=tk.X, pady=5)
+
+        ttk.Label(self.info_frame, text="Институт:").grid(row=0, column=0, sticky=tk.W)
+        self.institute_label = ttk.Label(self.info_frame, text="")
+        self.institute_label.grid(row=0, column=1, sticky=tk.W)
+
+        ttk.Label(self.info_frame, text="Тип обучения:").grid(row=1, column=0, sticky=tk.W)
+        self.education_label = ttk.Label(self.info_frame, text="")
+        self.education_label.grid(row=1, column=1, sticky=tk.W)
+
+        ttk.Label(self.info_frame, text="Курс:").grid(row=2, column=0, sticky=tk.W)
+        self.course_label = ttk.Label(self.info_frame, text="")
+        self.course_label.grid(row=2, column=1, sticky=tk.W)
+
+        # Область вывода расписания
+        schedule_frame = ttk.LabelFrame(main_frame, text="Расписание", padding=10)
+        schedule_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+
+        self.schedule_text = scrolledtext.ScrolledText(
+            schedule_frame,
+            wrap=tk.WORD,
+            width=80,
+            height=20,
+            font=('Consolas', 10)
+        )
+        self.schedule_text.pack(fill=tk.BOTH, expand=True)
+
+        # Нижняя панель кнопок
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=5)
+
+        self.add_to_calendar_btn = ttk.Button(
+            button_frame,
+            text="Добавить в Google Calendar",
+            state=tk.DISABLED,
+            command=self.add_to_calendar
+        )
+        self.add_to_calendar_btn.pack(side=tk.RIGHT, padx=5)
+
+        ttk.Button(button_frame, text="Очистить", command=self.clear_schedule).pack(side=tk.RIGHT, padx=5)
+
+        # Переменные для хранения данных
+        self.current_schedule = None
+        self.group_info = None
+
+    def fetch_schedule(self):
+        group = self.group_entry.get().strip()
+        week = self.week_entry.get().strip()
+
+        if not group or not week:
+            showinfo("Ошибка", "Введите номер группы и недели")
+            return
+
+        try:
+            # Декодируем информацию о группе
+            inst_num, edu_type, course = self.parser.decode_group(group)
+
+            # Обновляем информацию о группе
+            self.institute_label.config(text=f"Институт №{inst_num}")
+            self.education_label.config(text=edu_type)
+            self.course_label.config(text=course)
+
+            # Получаем расписание
+            self.group_info = {
+                'group': group,
+                'week': week,
+                'institute': f"Институт №{inst_num}",
+                'course': course,
+                'education_type': edu_type
+            }
+
+            # Проверяем кэш и базу данных
+            cached = self.parser.get_cached_schedule(group, week)
+            db_schedule = self.parser.db.get_schedule(group, week)
+
+            if cached:
+                self.current_schedule = cached["schedule"]
+                self.display_schedule()
+                self.add_to_calendar_btn.config(state=tk.NORMAL)
+                showinfo("Успех", "Расписание загружено из кэша")
+                return
+
+            if db_schedule:
+                self.current_schedule = db_schedule
+                self.display_schedule()
+                self.add_to_calendar_btn.config(state=tk.NORMAL)
+                showinfo("Успех", "Расписание загружено из базы данных")
+                return
+
+            # Если нет в кэше и БД, загружаем с сайта
+            self.schedule_text.delete(1.0, tk.END)
+            self.schedule_text.insert(tk.END, "Загрузка расписания... Пожалуйста, подождите...")
+            self.root.update()
+
+            html = self.parser.fetch_schedule(
+                group, week,
+                f"Институт №{inst_num}",
+                course,
+                edu_type
+            )
+
+            if html:
+                self.current_schedule = self.parser.parse_schedule(html)
+                self.parser.save_to_cache(group, week, {
+                    "education_type": edu_type,
+                    "schedule": self.current_schedule
+                })
+                self.parser.db.save_schedule(self.group_info, self.current_schedule)
+                self.display_schedule()
+                self.add_to_calendar_btn.config(state=tk.NORMAL)
+                showinfo("Успех", "Расписание успешно загружено")
+            else:
+                showinfo("Ошибка", "Не удалось загрузить расписание")
+
+        except Exception as e:
+            showinfo("Ошибка", f"Произошла ошибка: {str(e)}")
+
+    def display_schedule(self):
+        if not self.current_schedule:
+            return
+
+        self.schedule_text.delete(1.0, tk.END)
+
+        for day in self.current_schedule:
+            self.schedule_text.insert(tk.END, f"\n{day['date']}\n", 'header')
+            self.schedule_text.insert(tk.END, "-" * 60 + "\n")
+
+            if not day['lessons']:
+                self.schedule_text.insert(tk.END, "Нет занятий\n")
+                continue
+
+            for i, lesson in enumerate(day['lessons'], 1):
+                self.schedule_text.insert(tk.END, f"\nЗанятие {i}:\n")
+                self.schedule_text.insert(tk.END, f"Время: {lesson['time']}\n")
+                self.schedule_text.insert(tk.END, f"Предмет: {lesson['subject']}\n")
+                self.schedule_text.insert(tk.END, f"Тип: {lesson['type']}\n")
+                self.schedule_text.insert(tk.END, f"Преподаватель: {lesson['teacher']}\n")
+                self.schedule_text.insert(tk.END, f"Аудитория: {lesson['classroom']}\n")
+
+            self.schedule_text.insert(tk.END, "-" * 60 + "\n")
+
+        # Настройка тегов для форматирования
+        self.schedule_text.tag_config('header', foreground='blue', font=('Arial', 11, 'bold'))
+
+    def add_to_calendar(self):
+        if not self.current_schedule or not self.group_info:
+            showinfo("Ошибка", "Сначала загрузите расписание")
+            return
+
+        group = self.group_info['group']
+        try:
+            self.parser._add_to_google_calendar(group, self.current_schedule)
+            showinfo("Успех", "Расписание добавлено в Google Calendar")
+        except Exception as e:
+            showinfo("Ошибка", f"Не удалось добавить в календарь: {str(e)}")
+
+    def clear_schedule(self):
+        self.schedule_text.delete(1.0, tk.END)
+        self.current_schedule = None
+        self.group_info = None
+        self.add_to_calendar_btn.config(state=tk.DISABLED)
+        self.institute_label.config(text="")
+        self.education_label.config(text="")
+        self.course_label.config(text="")
 
 # Настройки Google Calendar API
 SCOPES = ['https://www.googleapis.com/auth/calendar']
@@ -77,7 +287,6 @@ class GoogleCalendarManager:
             ).execute()
             return event.get('htmlLink')
         except Exception as e:
-            print(f"Ошибка при создании события: {e}")
             return None
 
     def clear_old_events(self, days_to_keep=14):
@@ -101,24 +310,17 @@ class GoogleCalendarManager:
                         eventId=event['id']
                     ).execute()
         except Exception as e:
-            print(f"Ошибка при удалении старых событий: {e}")
+            pass
 
 
 class MAIScheduleDB:
-    """
-    Класс для работы с базой данных SQLite.
-    Хранит информацию о группах и их расписании.
-    """
     def __init__(self, db_name='schedule.db'):
         self.db_name = db_name
-        self._init_db()  # Инициализация базы данных при создании
+        self._init_db()
 
-
-    #эта функция создаёт таблицу, если её не существует
     def _init_db(self):
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
-            # Таблица групп
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS groups (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -129,7 +331,6 @@ class MAIScheduleDB:
                 )
             ''')
 
-            # Таблица расписания
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS schedule (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -151,7 +352,6 @@ class MAIScheduleDB:
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
 
-            # Добавляем группу, если ее нет в базе
             cursor.execute('''
                 INSERT OR IGNORE INTO groups (name, institute, course, education_type)
                 VALUES (?, ?, ?, ?)
@@ -162,20 +362,16 @@ class MAIScheduleDB:
                 group_info.get('education_type')
             ))
 
-            # Получаем ID группы
             cursor.execute('SELECT id FROM groups WHERE name = ?', (group_info['group'],))
             group_id = cursor.fetchone()[0]
 
-            # Сохраняем каждое занятие
             for day in schedule_data:
                 datetime_str = f"{day['date']}"
 
                 for lesson in day['lessons']:
-                    # Форматируем время (заменяем разделитель на дефис)
                     time_parts = lesson.get('time', '').split(' – ')
                     time_str = '-'.join(time_parts) if len(time_parts) > 1 else lesson.get('time', '')
 
-                    # Вставляем или обновляем запись о занятии
                     cursor.execute('''
                         INSERT OR REPLACE INTO schedule (
                             group_id, week_number, datetime, time,
@@ -195,13 +391,11 @@ class MAIScheduleDB:
 
             conn.commit()
 
-    #получаем расписание из базы данных
     def get_schedule(self, group_name, week_number=None):
         with sqlite3.connect(self.db_name) as conn:
-            conn.row_factory = sqlite3.Row  # Возвращать результаты как словари
+            conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
 
-            # Получаем информацию о группе
             cursor.execute('''
                 SELECT id, name, institute, course, education_type 
                 FROM groups 
@@ -212,7 +406,6 @@ class MAIScheduleDB:
             if not group_data:
                 return None
 
-            # Формируем запрос для получения расписания
             query = '''
                 SELECT datetime, time, subject, teacher, 
                        classroom, lesson_type
@@ -230,7 +423,6 @@ class MAIScheduleDB:
             cursor.execute(query, params)
             lessons = [dict(row) for row in cursor.fetchall()]
 
-            # Форматируем результат в тот же формат, что возвращает parse_schedule
             schedule = []
             current_date = None
             day_lessons = []
@@ -263,17 +455,12 @@ class MAIScheduleDB:
 
 
 class MAIScheduleParser:
-    """
-    Основной класс парсера расписания МАИ.
-    Обеспечивает загрузку, парсинг и обработку расписания.
-    """
     def __init__(self):
-        self.cache_dir = "schedule_cache"  # Директория для кэширования
+        self.cache_dir = "schedule_cache"
         os.makedirs(self.cache_dir, exist_ok=True)
 
-        # Настройки браузера Chrome для Selenium
         chrome_options = Options()
-        chrome_options.add_argument("--headless")  # Без графического интерфейса
+        chrome_options.add_argument("--headless")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-extensions")
@@ -285,50 +472,40 @@ class MAIScheduleParser:
         chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
         chrome_options.add_experimental_option("useAutomationExtension", False)
 
-        # Дополнительные настройки
         prefs = {
-            "profile.managed_default_content_settings.images": 2,  # Загрузка изображений
-            "profile.managed_default_content_settings.javascript": 1,  # JavaScript
-            "profile.default_content_setting_values.notifications": 2,  # Уведомления
+            "profile.managed_default_content_settings.images": 2,
+            "profile.managed_default_content_settings.javascript": 1,
+            "profile.default_content_setting_values.notifications": 2,
             "credentials_enable_service": False,
             "profile.password_manager_enabled": False
         }
         chrome_options.add_experimental_option("prefs", prefs)
 
-        # Инициализация драйвера Chrome
         self.driver = webdriver.Chrome(
             service=Service(ChromeDriverManager().install()),
             options=chrome_options
         )
 
-        self.driver.set_page_load_timeout(30)  # Таймаут загрузки страницы(после 30 секунд бездействия, окно закрывается)
-        self.driver.implicitly_wait(5)  # Неявное ожидание элементов
-        self.db = MAIScheduleDB()  # Экземпляр класса для работы с БД
-        self.gcal = GoogleCalendarManager()  # Экземпляр класса для работы с Google Calendar
+        self.driver.set_page_load_timeout(30)
+        self.driver.implicitly_wait(5)
+        self.db = MAIScheduleDB()
+        self.gcal = GoogleCalendarManager()
 
-
-    #выделяем(парсим) данные из уже готового html, который мы получили с помошью selenium, тыкая по кнопкам сайта
     def parse_schedule(self, html):
         soup = BeautifulSoup(html, 'html.parser')
         schedule = []
 
-        # Находим все дни с занятиями
         days = soup.find_all('div', class_='step-content')
 
-        #обрабатываем каждый день
         for day in days:
-            # Извлекаем дату
             date_element = day.find('span', class_='step-title')
             date = date_element.get_text(strip=True) if date_element else "Дата не указана"
 
             lessons = []
-            # Обрабатываем каждое занятие
             for lesson in day.find_all('div', class_='mb-4'):
-                # Время занятия
                 time_element = lesson.find('li', class_='list-inline-item')
                 time = time_element.get_text(strip=True) if time_element else "Время не указано"
 
-                # Название предмета, тут запарная логика: название предмета иногда хранится по частям в двух селекторах
                 subject_element = lesson.find('p', class_='mb-2 fw-semi-bold text-dark')
                 subject1 = subject_element.get_text(strip=True)[:-2] if subject_element else "Предмет не указан"
 
@@ -336,27 +513,20 @@ class MAIScheduleParser:
                 subject2 = subject_el2.get_text(strip=True)[:-2] if subject_el2 else ""
                 subject = subject1.replace(subject2, "", 1) + " " + subject2
 
-                # Преподаватель
                 teacher_element = lesson.find('a', class_='text-body')
                 teacher = teacher_element.get_text(strip=True) if teacher_element else "Преподаватель не указан"
 
-                # Тип занятия (лекция, практика и т.д.)
                 type_element = lesson.find('span', class_='badge')
                 lesson_type = type_element.get_text(strip=True) if type_element else "Тип не указан"
 
-                # Поиск аудитории: тут сайт тоже не даёт так просто получить номер аудитории, я заметил,
-                # что в любых обозначениях аудитории есть символ "-", мы собираем список всех селекторов с этим символом
-                # ищим среди них те, где есть цифры(во всех указанных аудиториях есть цифры), чтобы исключить
-                # Бояра-созоновича из списка аудиторий
                 text_nodes = lesson.find_all(string=True)
                 candidates = [text.strip() for text in text_nodes if '-' in text.strip()]
 
                 classroom = "Не указана"
                 for i in candidates:
-                    if any([j in "012345689" for j in i]):  # Ищем строку с цифрами
+                    if any([j in "012345689" for j in i]):
                         classroom = i
 
-                # Добавляем занятие в список
                 lessons.append({
                     "time": time,
                     "subject": subject,
@@ -365,44 +535,13 @@ class MAIScheduleParser:
                     "classroom": classroom
                 })
 
-            # Добавляем день в расписание
             schedule.append({
                 "date": date,
                 "lessons": lessons
             })
-            #ВАЖНО: в таком формате словаря у нас в программе хранится расписания, именно такой формат мы передаём в функции
 
         return schedule
 
-
-    #выводим расписание
-    def print_schedule(self, params, schedule):
-        print("\n" + "=" * 60)
-        print(f"РАСПИСАНИЕ ГРУППЫ {params['group']}".center(60))
-        print(f"Неделя {params['week']}".center(60))
-        print("=" * 60 + "\n")
-
-        for day in schedule:
-            print(f"\n {day['date']}")
-            print("-" * 60)
-
-            if not day['lessons']:
-                print("Нет занятий")
-                continue
-
-            # Выводим каждое занятие
-            for i, lesson in enumerate(day['lessons'], 1):
-                print(f"\nЗанятие {i}:")
-                print(f"Время: {lesson['time']}")
-                print(f"Предмет: {lesson['subject']}")
-                print(f"Тип: {lesson['type']}")
-                print(f"Преподаватель: {lesson['teacher']}")
-                print(f"Аудитория: {lesson['classroom']}")
-
-            print("-" * 60)
-
-
-    #возвращает расписание из кэша
     def get_cached_schedule(self, group, week):
         cache_file = os.path.join(self.cache_dir, f"{group}_week{week}.json")
         if os.path.exists(cache_file):
@@ -410,67 +549,48 @@ class MAIScheduleParser:
                 return json.load(f)
         return None
 
-    #сохраняем полученное расписание в json(кэш)
     def save_to_cache(self, group, week, schedule):
         cache_file = os.path.join(self.cache_dir, f"{group}_week{week}.json")
         with open(cache_file, 'w', encoding='utf-8') as f:
             json.dump(schedule, f, ensure_ascii=False, indent=2)
 
-
-    """
-    отдельная функция для нажатия кнопки "выбрать неделю" понадобится в блоке, где мы будем тыкать по кнопочкам через
-    selenium, запихана в отдельную функцию так как именно эту кнопку нажимать запарно
-    """
     def click_week_button(self):
         try:
-            # Ожидаем появления кнопки
             week_button = WebDriverWait(self.driver, 20).until(
                 EC.presence_of_element_located((By.XPATH,
                                                 "//a[contains(@class, 'btn-outline-primary') and contains(., 'Выбрать учебную неделю')]"))
             )
 
-            # Прокручиваем страницу к кнопке
             self.driver.execute_script("arguments[0].scrollIntoView({block: 'center', behavior: 'smooth'});",
                                        week_button)
             time.sleep(1)
 
-            # Подсвечиваем кнопку (для отладки)
             self.driver.execute_script("arguments[0].style.border = '2px solid red';", week_button)
             time.sleep(0.5)
 
-            # Кликаем по кнопке
             self.driver.execute_script("arguments[0].click();", week_button)
 
-            # Ожидаем появления меню выбора недели
             WebDriverWait(self.driver, 10).until(
                 EC.visibility_of_element_located((By.ID, "collapseWeeks")))
             return True
 
         except Exception as e:
-            print(f"Ошибка при клике по кнопке: {str(e)}")
             return False
 
     def fetch_schedule(self, group, week, faculty_name, course_number, education_type):
-        # в этой функции мы открываем в скрытом режиме хром и тыкаем на кнопочки, заходя на нужную страницу расписания
         try:
-            #тут я пытался сделать значёк загрузки но не вышло
-            print("[         ]", end="\r")
             self.driver.get("https://mai.ru/education/studies/schedule/")
-            print("[-        ]", end="\r")
 
-            # закрываем куки банер
             try:
                 cookie_banner = WebDriverWait(self.driver, 5).until(
                     EC.presence_of_element_located((By.ID, "cookie_message"))
                 )
                 accept_button = cookie_banner.find_element(By.XPATH, ".//button[contains(text(), 'Принять')]")
                 accept_button.click()
-                print("[--       ]", end="\r")
                 time.sleep(1)
             except:
-                print("Куки-баннер не найден или уже закрыт")
+                pass
 
-            # Выбор института
             department_select = WebDriverWait(self.driver, 10).until(
                 EC.element_to_be_clickable((By.ID, "department"))
             )
@@ -480,11 +600,9 @@ class MAIScheduleParser:
                 department_option = self.driver.find_element(By.XPATH,
                                                              f"//select[@id='department']/option[contains(text(), '{faculty_name}')]")
                 department_option.click()
-                print("[---      ]", end="\r")
             except:
-                print(f"Институт '{faculty_name}' не найден!")
+                pass
 
-            # Выбор курса
             course_select = WebDriverWait(self.driver, 10).until(
                 EC.element_to_be_clickable((By.ID, "course"))
             )
@@ -494,19 +612,15 @@ class MAIScheduleParser:
                 course_option = self.driver.find_element(By.XPATH,
                                                          f"//select[@id='course']/option[@value='{course_number}']")
                 course_option.click()
-                print("[----     ]", end="\r")
             except:
-                print(f"Курс {course_number} не найден!")
+                pass
 
-            # Нажатие кнопки "Отобразить"
             show_button = WebDriverWait(self.driver, 10).until(
                 EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Отобразить')]"))
             )
             show_button.click()
-            print("[-----    ]", end="\r")
             time.sleep(2)
 
-            # Выбор типа обучения
             nav_tabs = WebDriverWait(self.driver, 10).until(
                 EC.presence_of_element_located((By.CLASS_NAME, "nav-segment"))
             )
@@ -516,40 +630,31 @@ class MAIScheduleParser:
             education_tab = self.driver.find_element(By.XPATH, f"//a[contains(text(), '{education_type}')]")
             self.driver.execute_script("arguments[0].click();", education_tab)
 
-            print("[------   ]", end="\r")
             time.sleep(1)
 
-            # Выбор группы
             group_button = WebDriverWait(self.driver, 10).until(
                 EC.element_to_be_clickable((By.XPATH, f"//a[contains(@href, 'group={group}')]"))
             )
             group_button.click()
-            print("[-------  ]", end="\r")
 
-            # Выбор недели
             self.click_week_button()
-            print("[-------- ]", end="\r")
 
             week_element = WebDriverWait(self.driver, 10).until(
                 EC.element_to_be_clickable((By.XPATH,
                                             f"//div[@id='collapseWeeks']//a[contains(@href, 'week={week}')]"))
             )
             week_element.click()
-            print("[---------]", end="\r")
 
             return self.driver.page_source
         except Exception as e:
-            print(f"Ошибка при загрузке расписания: {e}")
             return None
 
-    #по группе определяем курс инстетут и тд
     def decode_group(self, group):
         group = group.split("-")
         inst = ""
         type_obr = ""
         course = ""
 
-        # Определение типа обучения по коду группы
         if "БВ" in group[1]:
             type_obr = "Базовое высшее образование"
         if "СВ" in group[1]:
@@ -561,17 +666,14 @@ class MAIScheduleParser:
         if "А" in group[1]:
             type_obr = "Аспирантура"
 
-        # Первая цифра в коде группы - курс
         course = group[1][0]
 
-        # Извлекаем номер института из первой части номера группы
         for i in group[0]:
             if i in "0123456789":
                 inst += i
 
         return (inst, type_obr, course)
 
-    #преобразуем дату из формата сайта в страндартный формат
     def _parse_date(self, date_str):
         months = {
             'января': '01', 'февраля': '02', 'марта': '03', 'апреля': '04',
@@ -580,15 +682,11 @@ class MAIScheduleParser:
         }
 
         try:
-            # Удаляем день недели и запятую
             date_part = date_str.split(',')[-1].strip()
-
-            # Разбиваем на число и месяц
             parts = date_part.split()
             if len(parts) == 2:
                 day, month_name = parts
             else:
-                # Альтернативный формат, если день недели в конце
                 date_part = date_str.split(',')[0].strip()
                 day, month_name = date_part.split()[-2:]
 
@@ -597,53 +695,33 @@ class MAIScheduleParser:
             year = datetime.now().year
 
             parsed_date = f"{year}-{month}-{day}"
-            print(f"Парсинг даты: '{date_str}' -> '{parsed_date}'")  # Отладочный вывод
             return parsed_date
         except Exception as e:
-            print(f"Ошибка парсинга даты '{date_str}': {e}")
             return datetime.now().strftime("%Y-%m-%d")
 
     def _parse_time(self, time_str):
-        """
-        Преобразует время занятия в стандартный формат
-        принимает время как строку в формате '09:00-10:30'
-        возвращает Кортеж (время начала, время окончания)
-        """
         try:
-            # Удаляем лишние пробелы и заменяем разные типы тире
             time_str = time_str.replace(' ', '').replace('–', '-').replace('—', '-')
             start_time, end_time = time_str.split('-')
             return f"{start_time}:00", f"{end_time}:00"
         except Exception as e:
-            print(f"Ошибка парсинга времени '{time_str}': {e}")
             return "09:00:00", "10:30:00"
 
     def _add_to_google_calendar(self, group_name, schedule_data):
-        """
-        Добавляет расписание в Google Calendar
-        принимет Номер группы и Данные расписания
-        """
-        self.gcal.clear_old_events()  # Очищаем старые события
+        self.gcal.clear_old_events()
 
         for lesson_day in schedule_data:
             original_date = lesson_day['date']
             try:
                 date_str = self._parse_date(original_date)
-                print(f"\nОбрабатываем: исходная дата '{original_date}' -> преобразованная '{date_str}'")
 
-                # Создаем событие для каждого занятия
                 for lesson in lesson_day['lessons']:
                     try:
                         start_time, end_time = self._parse_time(lesson['time'])
-                        start_datetime = f"{date_str}T{start_time}+03:00"  # Формат для Google Calendar
+                        start_datetime = f"{date_str}T{start_time}+03:00"
                         end_datetime = f"{date_str}T{end_time}+03:00"
 
-                        print(f"Создаем событие на {date_str} {start_time}-{end_time}:")
-                        print(f"  Предмет: {lesson.get('subject', 'Без названия')}")
-                        print(f"  Аудитория: {lesson.get('classroom', 'не указана')}")
-
-                        # Создаем событие в календаре
-                        event_link = self.gcal.create_event(
+                        self.gcal.create_event(
                             summary=f"{lesson.get('subject', 'Занятие')} ({lesson.get('type', '')})",
                             start_time=start_datetime,
                             end_time=end_datetime,
@@ -651,102 +729,18 @@ class MAIScheduleParser:
                             location=f"Аудитория: {lesson.get('classroom', 'не указана')}"
                         )
 
-                        if event_link:
-                            print(f"✅ Успешно создано: {event_link}")
-                        else:
-                            print("❌ Не удалось создать событие")
-
                     except Exception as e:
-                        print(f"❌ Ошибка в занятии: {str(e)}")
                         continue
 
             except Exception as e:
-                print(f"❌ Ошибка обработки дня '{original_date}': {str(e)}")
                 continue
 
     def run(self):
-        """
-        Основной метод для запуска парсера.
-        Обрабатывает пользовательский ввод, загружает и отображает расписание.
-        """
-        print("\n" + "=" * 40)
-        print(" ПАРСЕР РАСПИСАНИЯ МАИ ".center(40))
-        print("=" * 40 + "\n")
-
-        # Получаем входные данные от пользователя
-        group = input("Введите номер группы (например, М8О-104БВ-24): ")
-        week = input("Введите номер недели: ")
-        dg = self.decode_group(group)  # Анализируем номер группы
-
-        faculty_name = "Институт №" + dg[0]  # Формируем название института
-        course_number = dg[2]  # Номер курса
-        education_type = dg[1]  # Тип обучения
-
-        # Проверяем кэш
-        cached = self.get_cached_schedule(group, week)
-        if cached:
-             self.print_schedule({"group": group, "week": week, "education_type": cached["education_type"]},
-                                 cached["schedule"])
-             if input("\nЗагрузить новые данные? (y/n): ").lower() != 'y':
-                 if input("Добавить расписание в Google Calendar? (y/n): ").lower() == 'y':
-                     self._add_to_google_calendar(group, cached["schedule"])
-                 return
-
-        # проверка в базе данных
-        db_schedule = self.db.get_schedule(group, week)
-        if db_schedule:
-            print("\nНайдено расписание в локальной базе данных:")
-            self.print_schedule({
-                "group": group,
-                "week": week,
-                "education_type": education_type
-            }, db_schedule)
-
-            if input("\nЗагрузить новые данные с сайта? (y/n): ").lower() != 'y':
-                if input("Добавить расписание в Google Calendar ? (y/n): ").lower() == 'y':
-                    self._add_to_google_calendar(group, db_schedule)
-                return
-
-        # Если данных нет в кэше и локальной бд, загружаем с сайта
-        print("\nДанные не найдены в кэше, дождитесь загрузки...")
-        html = self.fetch_schedule(group, week, faculty_name, course_number, education_type)
-        if not html:
-            return
-
-        # Парсим HTML и сохраняем результаты
-        schedule = self.parse_schedule(html) #его формат - словарь из даты и списка пар
-
-        self.save_to_cache(group, week, {
-            "education_type": education_type,
-            "schedule": schedule
-        })
-
-        # Выводим расписание
-        self.print_schedule({
-            "group": group,
-            "week": week,
-            "education_type": education_type
-        }, schedule)
-
-        # Сохраняем в базу данных
-        group_info = {
-            'group': group,
-            'week': week,
-            'institute': "Институт №" + dg[0],
-            'course': course_number,
-            'education_type': education_type
-        }
-
-        self.db.save_schedule(group_info, schedule)
-        print("Данные успешно сохранены в базу данных")
-
-        # Предлагаем добавить в Google Calendar
-        if input("\nДобавить расписание в Google Calendar? (y/n): ").lower() == 'y':
-            self._add_to_google_calendar(group, schedule)
-
+        root = tk.Tk()
+        app = MAIScheduleApp(root, self)
+        root.mainloop()
 
 
 if __name__ == "__main__":
-    # Создаем и запускаем парсер
     parser = MAIScheduleParser()
     parser.run()
